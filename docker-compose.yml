@@ -1,0 +1,180 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database - Core data persistence
+  postgres:
+    image: postgres:16-alpine
+    container_name: ai-automate-postgres
+    environment:
+      POSTGRES_USER: ${DB_USER:-aiuser}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-aipassword123}
+      POSTGRES_DB: ${DB_NAME:-ai_automate_db}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8"
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      # Persist data across container restarts
+      - postgres_data:/var/lib/postgresql/data
+      # Optional: Initialize database with schema
+      - ./backend/migrations/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - ai-automate-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-aiuser}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Redis - Job queue and caching
+  redis:
+    image: redis:7-alpine
+    container_name: ai-automate-redis
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-redispassword123}
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      # Persist Redis data (AOF - Append Only File)
+      - redis_data:/data
+    networks:
+      - ai-automate-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # n8n - Workflow Automation Platform
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: ai-automate-n8n
+    environment:
+      - N8N_BASIC_AUTH_ACTIVE=true
+      - N8N_BASIC_AUTH_USER=${N8N_USER:-admin@example.com}
+      - N8N_BASIC_AUTH_PASSWORD=${N8N_PASSWORD:-n8npassword123}
+      - N8N_HOST=0.0.0.0
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - NODE_ENV=production
+      - WEBHOOK_URL=http://localhost:5678/
+      - DATABASE_TYPE=postgresdb
+      - DATABASE_HOST=postgres
+      - DATABASE_PORT=5432
+      - DATABASE_USER=${DB_USER:-aiuser}
+      - DATABASE_PASSWORD=${DB_PASSWORD:-aipassword123}
+      - DATABASE_NAME=${DB_NAME:-n8n_db}
+      - GENERIC_TIMEZONE=${TIMEZONE:-UTC}
+    ports:
+      - "${N8N_PORT:-5678}:5678"
+    volumes:
+      # Persist n8n home directory (credentials, workflows, etc)
+      - n8n_data:/home/node/.n8n
+    networks:
+      - ai-automate-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:5678/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Backend API - Node.js + Express
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ai-automate-backend
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      PORT: ${BACKEND_PORT:-3000}
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: ${DB_USER:-aiuser}
+      DB_PASSWORD: ${DB_PASSWORD:-aipassword123}
+      DB_NAME: ${DB_NAME:-ai_automate_db}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-redispassword123}
+      JWT_SECRET: ${JWT_SECRET:-your-super-secret-jwt-key-change-in-production}
+      JWT_EXPIRATION: ${JWT_EXPIRATION:-24h}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      CLAUDE_API_KEY: ${CLAUDE_API_KEY:-}
+      GMAIL_USER: ${GMAIL_USER:-}
+      GMAIL_PASSWORD: ${GMAIL_PASSWORD:-}
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+      N8N_BASE_URL: http://n8n:5678
+      N8N_API_KEY: ${N8N_API_KEY:-}
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:3001}
+    ports:
+      - "${BACKEND_PORT:-3000}:3000"
+    volumes:
+      # Mount source code for hot-reload in development
+      - ./backend/src:/app/src
+      - ./backend/uploads:/app/uploads
+    networks:
+      - ai-automate-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    command: npm run dev
+
+  # Frontend - React/Next.js
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: ai-automate-frontend
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:3000/api/v1}
+      NEXT_PUBLIC_WS_URL: ${NEXT_PUBLIC_WS_URL:-ws://localhost:3000}
+      NODE_ENV: ${NODE_ENV:-development}
+    ports:
+      - "${FRONTEND_PORT:-3001}:3000"
+    volumes:
+      # Mount source code for hot-reload
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+    networks:
+      - ai-automate-network
+    depends_on:
+      - backend
+    restart: unless-stopped
+    command: npm run dev
+
+  # Nginx - Reverse Proxy (Optional for production)
+  nginx:
+    image: nginx:alpine
+    container_name: ai-automate-nginx
+    ports:
+      - "${NGINX_PORT:-80}:80"
+      - "${NGINX_SSL_PORT:-443}:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+    networks:
+      - ai-automate-network
+    depends_on:
+      - backend
+      - frontend
+    restart: unless-stopped
+    profiles:
+      - production
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  n8n_data:
+    driver: local
+
+networks:
+  ai-automate-network:
+    driver: bridge
